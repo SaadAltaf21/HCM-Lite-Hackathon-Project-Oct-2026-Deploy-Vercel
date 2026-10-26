@@ -15,6 +15,32 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
+// Vercel (and other serverless hosts) import this file instead of running
+// it as the main script, so start() below never runs there. Without this,
+// the first database query buffers and times out after 10s with
+// "Operation `users.countDocuments()` buffering timed out". This middleware
+// connects once, waits for the connection, then lets the route run — so a
+// request never reaches Mongoose before the database is ready. On a normal
+// local run start() has already connected, so this is a no-op.
+const mongoose = require('mongoose');
+let dbPromise = null;
+app.use(async (req, res, next) => {
+  if (req.path === '/health' || req.path === '/api/health') return next();
+  if (mongoose.connection.readyState === 1) return next();
+  if (!dbPromise) {
+    dbPromise = connectDB().then(() => bootstrapAdmin()).catch((err) => {
+      dbPromise = null;
+      throw err;
+    });
+  }
+  try {
+    await dbPromise;
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get('/health', (req, res) => res.json({ ok: true, service: 'hcm-lite-server' }));
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'hcm-lite-server' }));
 

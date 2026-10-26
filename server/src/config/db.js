@@ -14,6 +14,10 @@ let memoryServer = null;
 async function connectDB() {
   const uri = (process.env.MONGO_URI || '').trim();
   mongoose.set('strictQuery', true);
+  // Give a slow first connection (e.g. the in-memory MongoDB binary download
+  // on a cold serverless start) longer than Mongoose's 10s default before
+  // any buffered operation can time out.
+  mongoose.set('bufferTimeoutMS', 120000);
   if (uri) {
     try {
       await mongoose.connect(uri);
