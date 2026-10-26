@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const leaveRequestSchema = new mongoose.Schema({
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Setting', default: null, index: true },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'Employee', required: true },
   leaveType: { type: mongoose.Schema.Types.ObjectId, ref: 'LeaveType', required: true },
   startDate: { type: String, required: true }, // YYYY-MM-DD

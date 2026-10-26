@@ -24,13 +24,14 @@ function scopeFor(user) {
 }
 
 async function toolGetHeadcount(user, args = {}) {
-  const d = await buildDashboard({ department: args.department || null });
+  const d = await buildDashboard({ department: args.department || null, companyId: user.companyId || null });
   return { headcount: d.headcount, headcountByDept: d.headcountByDept };
 }
 async function toolGetAttendanceSummary(user, args = {}) {
   const d = await buildDashboard({
     from: args.from, to: args.to, department: args.department || null,
     employeeId: user.role === 'employee' ? user.employeeId : null,
+    companyId: user.companyId || null,
   });
   return {
     period: d.period, attendanceRate: d.attendanceRate, latePercent: d.latePercent,
@@ -39,27 +40,27 @@ async function toolGetAttendanceSummary(user, args = {}) {
   };
 }
 async function toolGetLateComers(user) {
-  const d = await buildDashboard({ employeeId: user.role === 'employee' ? user.employeeId : null });
+  const d = await buildDashboard({ employeeId: user.role === 'employee' ? user.employeeId : null, companyId: user.companyId || null });
   return { topLateComers: d.topLateComers };
 }
 async function toolGetLeaveSummary(user, args = {}) {
-  const d = await buildDashboard({ department: args.department || null });
+  const d = await buildDashboard({ department: args.department || null, companyId: user.companyId || null });
   if (user.role === 'employee') {
-    const bal = await leaveBalanceFor(user.employeeId, Number(todayStr().slice(0, 4)));
+    const bal = await leaveBalanceFor(user.employeeId, Number(todayStr().slice(0, 4)), user.companyId || null);
     return { myLeaveBalance: bal };
   }
   return { leaveByType: d.leaveByType, onLeaveToday: d.onLeaveToday, pendingLeave: d.pendingLeave };
 }
 async function toolGetMyLeaveBalance(user) {
   if (!user.employeeId) return { error: 'This login is not linked to an employee record.' };
-  const bal = await leaveBalanceFor(user.employeeId, Number(todayStr().slice(0, 4)));
+  const bal = await leaveBalanceFor(user.employeeId, Number(todayStr().slice(0, 4)), user.companyId || null);
   return { leaveBalance: bal };
 }
 async function toolGetPayrollSummary(user, args = {}) {
   if (user.role === 'employee') {
     return { error: 'Payroll summaries are not available to employees; use your own payslip.' };
   }
-  const d = await buildDashboard({ department: args.department || null });
+  const d = await buildDashboard({ department: args.department || null, companyId: user.companyId || null });
   return {
     payrollCost: d.payrollCost, payrollNet: d.payrollNet, avgSalary: d.avgSalary,
     payrollCostByDept: d.payrollCostByDept, payrollCostByMonth: d.payrollCostByMonth,
@@ -77,6 +78,7 @@ async function toolSearchEmployees(user, args = {}) {
     return { employees: [{ code: me.code, name: `${me.firstName} ${me.lastName}`, department: me.department?.name || null, designation: me.designation?.name || null, status: me.status }] };
   }
   const rows = await Employee.find({
+    ...(user.companyId ? { companyId: user.companyId } : {}),
     $or: [
       { firstName: new RegExp(q, 'i') }, { lastName: new RegExp(q, 'i') },
       { code: new RegExp(q, 'i') }, { email: new RegExp(q, 'i') },
@@ -107,7 +109,7 @@ async function salaryRefusalIfNeeded(user, message) {
   if (!/(salary|pay|basic|wage|earn)/i.test(message)) return null;
   // Own salary questions are still refused via tools (no salary tool exists);
   // only a request naming someone else is a colleague-salary refusal.
-  const all = await Employee.find().select('firstName lastName code').lean();
+  const all = await Employee.find(user.companyId ? { companyId: user.companyId } : {}).select('firstName lastName code').lean();
   const me = user.employeeId ? all.find((e) => String(e._id) === String(user.employeeId)) : null;
   const lower = message.toLowerCase();
   const other = all.find((e) => e !== me && lower.includes(`${e.firstName} ${e.lastName}`.toLowerCase()));

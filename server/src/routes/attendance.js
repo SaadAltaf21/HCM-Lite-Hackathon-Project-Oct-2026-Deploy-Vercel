@@ -6,7 +6,7 @@ const AttendanceCorrection = require('../models/AttendanceCorrection');
 const Employee = require('../models/Employee');
 const LeaveRequest = require('../models/LeaveRequest');
 const Notification = require('../models/Notification');
-const { auth, requireRole, assertOwnEmployee, ownEmployeeId, scopeFilter } = require('../middleware/auth');
+const { auth, requireRole, assertOwnEmployee, ownEmployeeId, scopeFilter, companyFilter } = require('../middleware/auth');
 const { logAudit } = require('../utils/audit');
 const {
   getSetting, todayStr, timeStr, statusAtCheckIn, statusAtCheckOut, hoursBetween,
@@ -21,6 +21,7 @@ async function resolveEmployee(req, res) {
   if (req.user.role === 'employee' || req.user.role === 'hr') {
     if (!id) { res.status(403).json({ error: 'This login is not linked to an employee record' }); return null; }
     const emp = await Employee.findById(id);
+    if (emp && req.companyId && emp.companyId && String(emp.companyId) !== String(req.companyId)) { res.status(403).json({ error: 'Forbidden: employee belongs to another company' }); return null; }
     if (!emp) { res.status(404).json({ error: 'Employee record not found' }); return null; }
     return emp;
   }
@@ -28,21 +29,21 @@ async function resolveEmployee(req, res) {
   return null;
 }
 
-async function doCheckIn(emp, source) {
-  const setting = await getSetting();
+async function doCheckIn(emp, source, companyId) {
+  const setting = await getSetting(companyId);
   const date = todayStr();
   const existing = await Attendance.findOne({ employee: emp._id, date });
   if (existing) return { conflict: true };
   const checkIn = timeStr();
   const rec = await Attendance.create({
-    employee: emp._id, date, checkIn, status: statusAtCheckIn(checkIn, setting), source,
+    employee: emp._id, companyId: emp.companyId || companyId || null, date, checkIn, status: statusAtCheckIn(checkIn, setting), source,
   });
   return { rec, setting };
 }
 
 router.post('/check-in', async (req, res) => {
   const emp = await resolveEmployee(req, res); if (!emp) return;
-  const { rec, conflict } = await doCheckIn(emp, 'web');
+  const { rec, conflict } = await doCheckIn(emp, 'web', req.companyId);
   if (conflict) return res.status(409).json({ error: 'Already checked in today' });
   await logAudit(req, 'CREATE', 'Attendance', rec._id, null, { date: rec.date, checkIn: rec.checkIn });
   res.status(201).json(rec);
@@ -54,7 +55,7 @@ router.post('/check-out', async (req, res) => {
   const rec = await Attendance.findOne({ employee: emp._id, date });
   if (!rec) return res.status(404).json({ error: 'No check-in found for today' });
   if (rec.checkOut) return res.status(409).json({ error: 'Already checked out today' });
-  const setting = await getSetting();
+  const setting = await getSetting(req.companyId);
   const checkOut = timeStr();
   rec.checkOut = checkOut;
   rec.hours = Math.round(hoursBetween(rec.checkIn, checkOut) * 100) / 100;
@@ -73,7 +74,7 @@ router.post('/camera-check-in', async (req, res) => {
     return res.status(422).json({ error: 'Camera check-in rejected: GPS accuracy must be 100m or better', reason: 'accuracy > 100' });
   }
   if (lat === undefined || lng === undefined) return res.status(400).json({ error: 'lat and lng are required' });
-  const setting = await getSetting();
+  const setting = await getSetting(req.companyId);
   if (setting.officeLat === null || setting.officeLat === undefined || setting.officeLng === null || setting.officeLng === undefined) {
     return res.status(422).json({ error: 'Camera check-in rejected: office location is not configured', reason: 'office location not set' });
   }
@@ -81,7 +82,7 @@ router.post('/camera-check-in', async (req, res) => {
   if (distance > (setting.officeRadiusMeters ?? 150)) {
     return res.status(403).json({ error: 'Camera check-in rejected: outside office radius', reason: 'outside office radius', distanceMeters: Math.round(distance) });
   }
-  const { rec, conflict } = await doCheckIn(emp, 'camera');
+  const { rec, conflict } = await doCheckIn(emp, 'camera', req.companyId);
   if (conflict) return res.status(409).json({ error: 'Already checked in today' });
   await logAudit(req, 'CREATE', 'Attendance', rec._id, null, { date: rec.date, checkIn: rec.checkIn, source: 'camera' });
   res.status(201).json({ ...rec.toObject(), distanceMeters: Math.round(distance) });
@@ -91,7 +92,7 @@ router.post('/camera-check-in', async (req, res) => {
 router.get('/board', async (req, res) => {
   const date = req.query.date || todayStr();
   if (!isValidDateStr(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
-  let empFilter = {};
+  let empFilter = companyFilter(req);
   if (req.query.department) empFilter.department = req.query.department;
   if (req.user.role === 'employee') {
     if (!ownEmployeeId(req)) return res.json({ date, records: [], summary: {} });
@@ -148,7 +149,7 @@ router.post('/corrections', async (req, res) => {
   if (!date || !isValidDateStr(date) || !reason) return res.status(400).json({ error: 'date (YYYY-MM-DD) and reason are required' });
   const attendance = await Attendance.findOne({ employee: emp._id, date });
   const corr = await AttendanceCorrection.create({
-    employee: emp._id, attendance: attendance?._id || null, date,
+    employee: emp._id, companyId: emp.companyId || req.companyId || null, attendance: attendance?._id || null, date,
     requestedCheckIn: requestedCheckIn || null, requestedCheckOut: requestedCheckOut || null, reason,
   });
   await logAudit(req, 'CREATE', 'AttendanceCorrection', corr._id, null, { date, reason });
@@ -165,7 +166,7 @@ router.get('/corrections', async (req, res) => {
 router.patch('/corrections/:id', requireRole('hr'), async (req, res) => {
   const { status, approverComment } = req.body || {};
   if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: 'status must be approved or rejected' });
-  const corr = await AttendanceCorrection.findById(req.params.id);
+  const corr = await AttendanceCorrection.findOne({ _id: req.params.id, ...companyFilter(req) });
   if (!corr) return res.status(404).json({ error: 'Correction not found' });
   if (corr.status !== 'pending') return res.status(409).json({ error: 'Correction already decided' });
   const before = corr.toObject();
@@ -173,7 +174,7 @@ router.patch('/corrections/:id', requireRole('hr'), async (req, res) => {
   await corr.save();
   let updatedAttendance = null;
   if (status === 'approved') {
-    const setting = await getSetting();
+    const setting = await getSetting(req.companyId);
     const rec = await Attendance.findOne({ employee: corr.employee, date: corr.date });
     if (rec) {
       if (corr.requestedCheckIn) rec.checkIn = corr.requestedCheckIn;
@@ -185,7 +186,7 @@ router.patch('/corrections/:id', requireRole('hr'), async (req, res) => {
       await rec.save(); updatedAttendance = rec;
     } else if (corr.requestedCheckIn) {
       updatedAttendance = await Attendance.create({
-        employee: corr.employee, date: corr.date, checkIn: corr.requestedCheckIn,
+        employee: corr.employee, companyId: corr.companyId || req.companyId || null, date: corr.date, checkIn: corr.requestedCheckIn,
         checkOut: corr.requestedCheckOut || null, source: 'web',
         status: corr.requestedCheckOut
           ? statusAtCheckOut(corr.requestedCheckIn, corr.requestedCheckOut, setting)
@@ -194,10 +195,10 @@ router.patch('/corrections/:id', requireRole('hr'), async (req, res) => {
       });
     }
     const emp = await Employee.findById(corr.employee);
-    if (emp && emp.user) await Notification.create({ user: emp.user, message: `Your attendance correction for ${corr.date} was approved.`, type: 'correction' });
+    if (emp && emp.user) await Notification.create({ user: emp.user, companyId: emp.companyId || req.companyId || null, message: `Your attendance correction for ${corr.date} was approved.`, type: 'correction' });
   } else {
     const emp = await Employee.findById(corr.employee);
-    if (emp && emp.user) await Notification.create({ user: emp.user, message: `Your attendance correction for ${corr.date} was rejected.${approverComment ? ` ${approverComment}` : ''}`, type: 'correction' });
+    if (emp && emp.user) await Notification.create({ user: emp.user, companyId: emp.companyId || req.companyId || null, message: `Your attendance correction for ${corr.date} was rejected.${approverComment ? ` ${approverComment}` : ''}`, type: 'correction' });
   }
   await logAudit(req, 'UPDATE', 'AttendanceCorrection', corr._id, before, corr);
   res.json({ correction: corr, attendance: updatedAttendance });

@@ -4,6 +4,7 @@ const AuditLog = require('../models/AuditLog');
 async function logAudit(req, action, entity, entityId, before, after) {
   try {
     await AuditLog.create({
+      companyId: req && (req.companyId || (req.user && req.user.companyId)) ? (req.companyId || req.user.companyId) : null,
       actor: req && req.user ? req.user._id : null,
       actorEmail: req && req.user ? req.user.email : null,
       action,

@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 // One record per employee per day (unique index below).
 const attendanceSchema = new mongoose.Schema({
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Setting', default: null, index: true },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'Employee', required: true },
   date: { type: String, required: true }, // YYYY-MM-DD
   checkIn: { type: String, default: null }, // HH:MM:SS (server-stamped)

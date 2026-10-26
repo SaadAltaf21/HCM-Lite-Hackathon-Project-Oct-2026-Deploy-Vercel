@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 // Login account. Employees get a User row when HR registers them.
 const userSchema = new mongoose.Schema({
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Setting', default: null, index: true },
   name: { type: String, trim: true },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   passwordHash: { type: String, required: true },

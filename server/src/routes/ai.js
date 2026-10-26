@@ -98,7 +98,7 @@ router.post('/chat', async (req, res) => {
     result = null;
   }
   if (!result) result = await localAnswer(req.user, message);
-  await AiLog.create({ user: req.user._id, question: message, toolsUsed: result.toolsUsed, answer: result.answer });
+  await AiLog.create({ user: req.user._id, companyId: req.companyId || null, question: message, toolsUsed: result.toolsUsed, answer: result.answer });
   res.json({ answer: result.answer, toolsUsed: result.toolsUsed, label: 'AI-generated' });
 });
 
@@ -186,7 +186,7 @@ router.post('/smart-leave', async (req, res) => {
       .replace(/\s+/g, ' ').trim() || 'Personal leave';
   }
 
-  const setting = await getSetting();
+  const setting = await getSetting(req.companyId);
   const workingDays = (await workingDaysBetween(startStr, endStr, setting)).length;
   let balanceNote = null;
   if (req.user.employeeId) {

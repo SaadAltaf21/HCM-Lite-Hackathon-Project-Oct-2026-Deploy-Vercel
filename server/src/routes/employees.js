@@ -9,7 +9,7 @@ const Department = require('../models/Department');
 const Designation = require('../models/Designation');
 const Attendance = require('../models/Attendance');
 const PayrollRun = require('../models/PayrollRun');
-const { auth, requireRole, assertOwnEmployee, ownEmployeeId } = require('../middleware/auth');
+const { auth, requireRole, assertOwnEmployee, ownEmployeeId, companyFilter } = require('../middleware/auth');
 const { logAudit } = require('../utils/audit');
 const { leaveBalanceFor } = require('../services/dashboard');
 const { isValidDateStr, todayStr } = require('../services/rules');
@@ -42,14 +42,15 @@ function parseCsv(text) {
   return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
 }
 
-async function validateCsvRows(rows, header) {
+async function validateCsvRows(rows, header, companyId) {
+  const cf = companyId ? { companyId } : {};
   const idx = (name) => header.findIndex((h) => h.trim().toLowerCase() === name);
   const errors = []; const valid = [];
-  const depts = await Department.find().lean();
+  const depts = await Department.find(cf).lean();
   const deptByName = new Map(depts.map((d) => [d.name.toLowerCase(), d]));
-  const desigs = await Designation.find().lean();
+  const desigs = await Designation.find(cf).lean();
   const desigByName = new Map(desigs.map((d) => [d.name.toLowerCase(), d]));
-  const existing = await Employee.find().select('code email').lean();
+  const existing = await Employee.find(cf).select('code email').lean();
   const seenCode = new Set(existing.map((e) => e.code.toLowerCase()));
   const seenEmail = new Set(existing.map((e) => e.email.toLowerCase()));
   const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -89,7 +90,7 @@ async function validateCsvRows(rows, header) {
 
 // GET /api/employees/export/csv (hr) — before /:id
 router.get('/export/csv', requireRole('hr'), async (req, res) => {
-  const rows = await Employee.find().populate('department', 'name').populate('designation', 'name').sort({ code: 1 }).lean();
+  const rows = await Employee.find(companyFilter(req)).populate('department', 'name').populate('designation', 'name').sort({ code: 1 }).lean();
   const header = ['code', 'firstName', 'lastName', 'email', 'phone', 'department', 'designation', 'joiningDate', 'salaryBasic', 'status'];
   const lines = [header.join(',')];
   for (const e of rows) {
@@ -105,7 +106,7 @@ router.post('/import/dry-run', requireRole('hr'), async (req, res) => {
   if (!csv || typeof csv !== 'string') return res.status(400).json({ error: 'csv text is required' });
   const rows = parseCsv(csv);
   if (rows.length < 2) return res.status(400).json({ error: 'csv must have a header row and at least one data row' });
-  const { errors, valid } = await validateCsvRows(rows, rows[0]);
+  const { errors, valid } = await validateCsvRows(rows, rows[0], req.companyId);
   res.json({ errors, validCount: valid.length, totalRows: rows.length - 1 });
 });
 
@@ -114,15 +115,16 @@ router.post('/import/confirm', requireRole('hr'), async (req, res) => {
   if (!csv || typeof csv !== 'string') return res.status(400).json({ error: 'csv text is required' });
   const rows = parseCsv(csv);
   if (rows.length < 2) return res.status(400).json({ error: 'csv must have a header row and at least one data row' });
-  const { errors, valid } = await validateCsvRows(rows, rows[0]);
+  const { errors, valid } = await validateCsvRows(rows, rows[0], req.companyId);
   const created = [];
   for (const v of valid) {
     const tempPassword = v.tempPassword || crypto.randomBytes(6).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 10);
     const user = await User.create({
       name: `${v.firstName} ${v.lastName}`, email: v.email,
       passwordHash: await bcrypt.hash(tempPassword, 10), role: 'employee', mustChangePassword: true,
+      companyId: req.companyId || null,
     });
-    const emp = await Employee.create({ ...v, tempPassword: undefined, user: user._id });
+    const emp = await Employee.create({ ...v, tempPassword: undefined, user: user._id, companyId: req.companyId || null });
     user.employeeId = emp._id; await user.save();
     created.push({ id: emp._id, code: emp.code, email: emp.email, tempPassword });
     await logAudit(req, 'CREATE', 'Employee', emp._id, null, { code: emp.code, email: emp.email });
@@ -139,19 +141,20 @@ router.post('/', requireRole('hr'), async (req, res) => {
   if (!isValidDateStr(joiningDate)) return res.status(400).json({ error: 'joiningDate must be YYYY-MM-DD' });
   // Validate references before creating the login, so a bad department cannot
   // leave an orphan User row behind.
-  if (!(await Department.findById(department))) return res.status(400).json({ error: 'Unknown department' });
-  if (designation && !(await Designation.findById(designation))) return res.status(400).json({ error: 'Unknown designation' });
+  if (!(await Department.findOne({ _id: department, ...companyFilter(req) }))) return res.status(400).json({ error: 'Unknown department' });
+  if (designation && !(await Designation.findOne({ _id: designation, ...companyFilter(req) }))) return res.status(400).json({ error: 'Unknown designation' });
   try {
     const temp = tempPassword || crypto.randomBytes(6).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 10);
     const user = await User.create({
       name: `${firstName} ${lastName}`, email: String(email).toLowerCase(),
       passwordHash: await bcrypt.hash(temp, 10), role: 'employee', mustChangePassword: true,
+      companyId: req.companyId || null,
     });
     const emp = await Employee.create({
       code, firstName, lastName, email: String(email).toLowerCase(), phone: phone || '',
       address: address || '', department, designation: designation || null, joiningDate,
       salaryBasic, status: status || 'active', gender: gender || '', employmentType: employmentType || 'full-time',
-      user: user._id,
+      user: user._id, companyId: req.companyId || null,
     });
     user.employeeId = emp._id; await user.save();
     await logAudit(req, 'CREATE', 'Employee', emp._id, null, { code, email });
@@ -166,7 +169,7 @@ router.post('/', requireRole('hr'), async (req, res) => {
 router.get('/', async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-  const filter = {};
+  const filter = companyFilter(req);
   if (req.user.role === 'employee') {
     if (!ownEmployeeId(req)) return res.json({ data: [], page, limit, total: 0, totalPages: 0 });
     filter._id = req.user.employeeId;
@@ -186,7 +189,7 @@ router.get('/', async (req, res) => {
 // GET /api/employees/:id — Employee 360: profile + attendance summary + leave balance + latest payslip.
 router.get('/:id', async (req, res) => {
   if (!assertOwnEmployee(req, res, req.params.id)) return;
-  const emp = await Employee.findById(req.params.id).populate('department', 'name').populate('designation', 'name');
+  const emp = await Employee.findOne({ _id: req.params.id, ...companyFilter(req) }).populate('department', 'name').populate('designation', 'name');
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
   const att = await Attendance.find({ employee: emp._id }).lean();
   const attendanceSummary = {
@@ -197,8 +200,8 @@ router.get('/:id', async (req, res) => {
     missingCheckout: att.filter((a) => a.status === 'missing_checkout').length,
     hours: Math.round(att.reduce((s, a) => s + (a.hours || 0), 0) * 100) / 100,
   };
-  const leaveBalance = await leaveBalanceFor(emp._id, Number(todayStr().slice(0, 4)));
-  const runs = await PayrollRun.find().sort({ month: -1 }).lean();
+  const leaveBalance = await leaveBalanceFor(emp._id, Number(todayStr().slice(0, 4)), req.companyId);
+  const runs = await PayrollRun.find(companyFilter(req)).sort({ month: -1 }).lean();
   let latestPayslip = null;
   for (const run of runs) {
     const item = run.items.find((i) => String(i.employee) === String(emp._id));
@@ -214,18 +217,18 @@ router.patch('/:id', async (req, res) => {
     const allowed = {};
     if (req.body.phone !== undefined) allowed.phone = req.body.phone;
     if (req.body.address !== undefined) allowed.address = req.body.address;
-    const doc = await Employee.findByIdAndUpdate(req.params.id, allowed, { new: true, runValidators: true });
+    const doc = await Employee.findOneAndUpdate({ _id: req.params.id, ...companyFilter(req) }, allowed, { new: true, runValidators: true });
     if (!doc) return res.status(404).json({ error: 'Employee not found' });
     await logAudit(req, 'UPDATE', 'Employee', doc._id, null, allowed);
     return res.json(doc);
   }
   if (req.user.role !== 'hr') return res.status(403).json({ error: 'Forbidden: insufficient role' });
-  const before = await Employee.findById(req.params.id);
+  const before = await Employee.findOne({ _id: req.params.id, ...companyFilter(req) });
   if (!before) return res.status(404).json({ error: 'Employee not found' });
   if (req.body.salaryBasic !== undefined && !(req.body.salaryBasic > 0)) {
     return res.status(400).json({ error: 'salaryBasic must be greater than 0' });
   }
-  const doc = await Employee.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+  const doc = await Employee.findOneAndUpdate({ _id: req.params.id, ...companyFilter(req) }, req.body, { new: true, runValidators: true });
   await logAudit(req, 'UPDATE', 'Employee', doc._id, before, doc);
   res.json(doc);
 });

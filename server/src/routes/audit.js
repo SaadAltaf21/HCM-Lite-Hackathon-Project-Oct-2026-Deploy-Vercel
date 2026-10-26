@@ -1,6 +1,6 @@
 const express = require('express');
 const AuditLog = require('../models/AuditLog');
-const { auth, requireRole } = require('../middleware/auth');
+const { auth, requireRole, companyFilter } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(auth, requireRole('admin'));
@@ -9,7 +9,7 @@ router.use(auth, requireRole('admin'));
 router.get('/', async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
-  const filter = {};
+  const filter = companyFilter(req);
   if (req.query.entity) filter.entity = req.query.entity;
   if (req.query.action) filter.action = req.query.action;
   const total = await AuditLog.countDocuments(filter);

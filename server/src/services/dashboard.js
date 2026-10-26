@@ -8,8 +8,8 @@ const PayrollRun = require('../models/PayrollRun');
 const Department = require('../models/Department');
 const { todayStr, parseDate, fmtDate, derivedStatus, eachDate, isWeekend, holidaySet } = require('./rules');
 
-async function leaveBalanceFor(employeeId, year) {
-  const types = await LeaveType.find().lean();
+async function leaveBalanceFor(employeeId, year, companyId) {
+  const types = await LeaveType.find(companyId ? { companyId } : {}).lean();
   const reqs = await LeaveRequest.find({
     employee: employeeId,
     status: { $in: ['approved', 'pending'] },
@@ -28,9 +28,10 @@ async function leaveBalanceFor(employeeId, year) {
   });
 }
 
-async function buildDashboard({ from, to, department, employeeId = null }) {
+async function buildDashboard({ from, to, department, employeeId = null, companyId = null }) {
+  const cf = companyId ? { companyId } : {};
   const today = todayStr();
-  const empFilter = { status: { $in: ['active', 'probation'] } };
+  const empFilter = { ...cf, status: { $in: ['active', 'probation'] } };
   if (department) empFilter.department = department;
   if (employeeId) empFilter._id = employeeId;
   const employees = await Employee.find(empFilter).populate('department', 'name').lean();
@@ -83,8 +84,8 @@ async function buildDashboard({ from, to, department, employeeId = null }) {
   // Absent days in period: working days (Mon-Fri approx via weekend rule) minus
   // attended / approved-leave days — computed per employee per working day.
   const Setting = require('../models/Setting');
-  const setting = (await Setting.findOne()) || { weekendDays: ['Sat', 'Sun'] };
-  const holidays = await holidaySet(periodFrom, periodTo);
+  const setting = (companyId ? await Setting.findById(companyId) : await Setting.findOne()) || { weekendDays: ['Sat', 'Sun'] };
+  const holidays = await holidaySet(periodFrom, periodTo, companyId);
   const workingDates = eachDate(periodFrom, periodTo)
     .filter((d) => !isWeekend(d, setting) && !holidays.has(d));
   const attendedByEmp = new Map();
@@ -135,10 +136,10 @@ async function buildDashboard({ from, to, department, employeeId = null }) {
   const runMonths = new Set();
   { const cur = parseDate(periodFrom); const end = parseDate(periodTo);
     while (cur <= end) { runMonths.add(fmtDate(cur).slice(0, 7)); cur.setMonth(cur.getMonth() + 1); } }
-  const runs = await PayrollRun.find({ month: { $in: [...runMonths] } }).lean();
+  const runs = await PayrollRun.find({ ...cf, month: { $in: [...runMonths] } }).lean();
   let payrollCost = 0; let payrollNet = 0;
   const payrollByDept = {}; const payrollByMonth = {};
-  const deptNameById = new Map((await Department.find().lean()).map((d) => [String(d._id), d.name]));
+  const deptNameById = new Map((await Department.find(cf).lean()).map((d) => [String(d._id), d.name]));
   for (const run of runs) {
     payrollByMonth[run.month] = payrollByMonth[run.month] || { month: run.month, gross: 0, net: 0 };
     for (const item of run.items) {
@@ -154,7 +155,7 @@ async function buildDashboard({ from, to, department, employeeId = null }) {
     ? Math.round((employees.reduce((s, e) => s + (e.salaryBasic || 0), 0) / employees.length) * 100) / 100 : 0;
   const headcountByDept = Object.values(byDept).map((d) => ({ department: d.department, headcount: d.headcount }));
   const exitedYTD = await Employee.countDocuments({
-    status: 'exited', ...(department ? { department } : {}),
+    ...cf, status: 'exited', ...(department ? { department } : {}),
   });
   const avgHeadcount = Math.max(1, (employees.length + exitedYTD) / 2);
   const attritionYTD = Math.round(((exitedYTD / avgHeadcount) * 100) * 10) / 10;
@@ -186,7 +187,7 @@ async function buildDashboard({ from, to, department, employeeId = null }) {
 async function employeeDashboard(user, { from, to }) {
   const emp = await Employee.findById(user.employeeId).populate('department', 'name').populate('designation', 'name').lean();
   if (!emp) return null;
-  const base = await buildDashboard({ from, to, employeeId: emp._id });
+  const base = await buildDashboard({ from, to, employeeId: emp._id, companyId: user.companyId || null });
   const today = todayStr();
   // Hours this week (Monday-Sunday) vs 40.
   const now = new Date();
@@ -201,16 +202,16 @@ async function employeeDashboard(user, { from, to }) {
   }).lean();
   const lateCount = monthAtt.filter((a) => derivedStatus(a) === 'late').length;
   const year = Number(today.slice(0, 4));
-  const leaveBalance = await leaveBalanceFor(emp._id, year);
+  const leaveBalance = await leaveBalanceFor(emp._id, year, user.companyId || null);
   const PayrollRunM = require('../models/PayrollRun');
-  const runs = await PayrollRunM.find().sort({ month: -1 }).lean();
+  const runs = await PayrollRunM.find(user.companyId ? { companyId: user.companyId } : {}).sort({ month: -1 }).lean();
   let lastPayslip = null;
   for (const run of runs) {
     const item = run.items.find((i) => String(i.employee) === String(emp._id));
     if (item) { lastPayslip = { month: run.month, status: run.status, ...item }; break; }
   }
   const Announcement = require('../models/Announcement');
-  const announcements = await Announcement.find().sort({ createdAt: -1 }).limit(5).lean();
+  const announcements = await Announcement.find(user.companyId ? { companyId: user.companyId } : {}).sort({ createdAt: -1 }).limit(5).lean();
   return {
     employee: emp, hoursThisWeek, hoursTarget: 40, lateCount, leaveBalance,
     lastPayslip, announcements, attendanceRate: base.attendanceRate,

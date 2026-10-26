@@ -1,7 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
-const { auth, requireRole } = require('../middleware/auth');
+const { auth, requireRole, companyFilter } = require('../middleware/auth');
 const { logAudit } = require('../utils/audit');
 
 const router = express.Router();
@@ -9,7 +9,7 @@ router.use(auth, requireRole('admin'));
 
 // GET /api/users (admin only)
 router.get('/', async (req, res) => {
-  const users = await User.find().select('-passwordHash').sort({ createdAt: 1 });
+  const users = await User.find(companyFilter(req)).select('-passwordHash').sort({ createdAt: 1 });
   res.json(users);
 });
 
@@ -22,6 +22,7 @@ router.post('/', async (req, res) => {
     const user = await User.create({
       name: name || '', email: String(email).toLowerCase(),
       passwordHash: await bcrypt.hash(password, 10), role: 'hr',
+      companyId: req.companyId || null,
     });
     await logAudit(req, 'CREATE', 'User', user._id, null, { email: user.email, role: 'hr' });
     return res.status(201).json(user.toSafeJSON());
@@ -32,7 +33,7 @@ router.post('/', async (req, res) => {
 });
 
 router.patch('/:id/deactivate', async (req, res) => {
-  const user = await User.findById(req.params.id);
+  const user = await User.findOne({ _id: req.params.id, ...companyFilter(req) });
   if (!user) return res.status(404).json({ error: 'User not found' });
   const before = { active: user.active };
   user.active = false; await user.save();
@@ -41,7 +42,7 @@ router.patch('/:id/deactivate', async (req, res) => {
 });
 
 router.patch('/:id/activate', async (req, res) => {
-  const user = await User.findById(req.params.id);
+  const user = await User.findOne({ _id: req.params.id, ...companyFilter(req) });
   if (!user) return res.status(404).json({ error: 'User not found' });
   const before = { active: user.active };
   user.active = true; await user.save();
@@ -53,7 +54,7 @@ router.patch('/:id/reset-password', async (req, res) => {
   const { newPassword, tempPassword } = req.body || {};
   const next = newPassword || tempPassword;
   if (!next || next.length < 6) return res.status(400).json({ error: 'newPassword must be at least 6 characters' });
-  const user = await User.findById(req.params.id);
+  const user = await User.findOne({ _id: req.params.id, ...companyFilter(req) });
   if (!user) return res.status(404).json({ error: 'User not found' });
   user.passwordHash = await bcrypt.hash(next, 10);
   user.mustChangePassword = true;

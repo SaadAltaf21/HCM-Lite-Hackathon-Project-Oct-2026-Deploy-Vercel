@@ -5,7 +5,7 @@ const Department = require('../models/Department');
 const Designation = require('../models/Designation');
 const LeaveType = require('../models/LeaveType');
 const Holiday = require('../models/Holiday');
-const { auth, requireRole } = require('../middleware/auth');
+const { auth, requireRole, companyFilter } = require('../middleware/auth');
 const { logAudit } = require('../utils/audit');
 const { isValidDateStr } = require('../services/rules');
 
@@ -18,11 +18,11 @@ function crud(Model, entity, { employeeReadable = false } = {}) {
     if (req.user.role === 'employee' && !employeeReadable) {
       return res.status(403).json({ error: 'Forbidden: insufficient role' });
     }
-    res.json(await Model.find().sort({ name: 1, date: 1 }));
+    res.json(await Model.find(companyFilter(req)).sort({ name: 1, date: 1 }));
   });
   r.post('/', requireRole('admin'), async (req, res) => {
     try {
-      const doc = await Model.create(req.body);
+      const doc = await Model.create({ ...req.body, companyId: req.companyId || null });
       await logAudit(req, 'CREATE', entity, doc._id, null, doc);
       return res.status(201).json(doc);
     } catch (err) {
@@ -31,14 +31,14 @@ function crud(Model, entity, { employeeReadable = false } = {}) {
     }
   });
   r.patch('/:id', requireRole('admin'), async (req, res) => {
-    const before = await Model.findById(req.params.id);
+    const before = await Model.findOne({ _id: req.params.id, ...companyFilter(req) });
     if (!before) return res.status(404).json({ error: `${entity} not found` });
-    const doc = await Model.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    const doc = await Model.findOneAndUpdate({ _id: req.params.id, ...companyFilter(req) }, req.body, { new: true, runValidators: true });
     await logAudit(req, 'UPDATE', entity, doc._id, before, doc);
     res.json(doc);
   });
   r.delete('/:id', requireRole('admin'), async (req, res) => {
-    const doc = await Model.findByIdAndDelete(req.params.id);
+    const doc = await Model.findOneAndDelete({ _id: req.params.id, ...companyFilter(req) });
     if (!doc) return res.status(404).json({ error: `${entity} not found` });
     await logAudit(req, 'DELETE', entity, doc._id, doc, null);
     res.json({ message: `${entity} deleted` });

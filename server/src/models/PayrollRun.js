@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 // Items snapshot the numbers at run time; a finalized run is never edited.
 const payrollItemSchema = new mongoose.Schema({
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Setting', default: null, index: true },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'Employee', required: true },
   employeeName: { type: String, default: '' },
   employeeCode: { type: String, default: '' },
@@ -21,10 +22,12 @@ const payrollItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const payrollRunSchema = new mongoose.Schema({
-  month: { type: String, required: true, unique: true }, // YYYY-MM
+  month: { type: String, required: true }, // YYYY-MM
   status: { type: String, enum: ['draft', 'finalized'], default: 'draft' },
   items: { type: [payrollItemSchema], default: [] },
   finalizedAt: { type: Date, default: null },
 }, { timestamps: true });
+
+payrollRunSchema.index({ companyId: 1, month: 1 }, { unique: true });
 
 module.exports = mongoose.model('PayrollRun', payrollRunSchema);

@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 // Append-only by convention: no route updates or deletes audit rows.
 const auditLogSchema = new mongoose.Schema({
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Setting', default: null, index: true },
   actor: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   actorEmail: { type: String, default: null },
   action: { type: String, required: true }, // e.g. CREATE, UPDATE, APPROVE, FINALIZE

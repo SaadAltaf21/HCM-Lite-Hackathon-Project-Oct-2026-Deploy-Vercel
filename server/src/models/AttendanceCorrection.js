@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const correctionSchema = new mongoose.Schema({
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Setting', default: null, index: true },
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'Employee', required: true },
   attendance: { type: mongoose.Schema.Types.ObjectId, ref: 'Attendance', default: null },
   date: { type: String, required: true }, // YYYY-MM-DD

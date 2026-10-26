@@ -4,7 +4,7 @@ const LeaveRequest = require('../models/LeaveRequest');
 const LeaveType = require('../models/LeaveType');
 const Employee = require('../models/Employee');
 const Notification = require('../models/Notification');
-const { auth, requireRole, ownEmployeeId, scopeFilter } = require('../middleware/auth');
+const { auth, requireRole, ownEmployeeId, scopeFilter, companyFilter } = require('../middleware/auth');
 const { logAudit } = require('../utils/audit');
 const { getSetting, workingDaysBetween, isValidDateStr, todayStr } = require('../services/rules');
 const { leaveBalanceFor } = require('../services/dashboard');
@@ -16,6 +16,7 @@ async function resolveEmployee(req, res) {
   const id = ownEmployeeId(req);
   if (!id) { res.status(403).json({ error: 'This login is not linked to an employee record' }); return null; }
   const emp = await Employee.findById(id);
+  if (emp && req.companyId && emp.companyId && String(emp.companyId) !== String(req.companyId)) { res.status(403).json({ error: 'Forbidden: employee belongs to another company' }); return null; }
   if (!emp) { res.status(404).json({ error: 'Employee record not found' }); return null; }
   return emp;
 }
@@ -27,9 +28,9 @@ router.post('/', async (req, res) => {
   if (!isValidDateStr(startDate) || !isValidDateStr(endDate) || endDate < startDate) {
     return res.status(400).json({ error: 'Invalid date range (YYYY-MM-DD, endDate >= startDate)' });
   }
-  const type = await LeaveType.findById(leaveType);
+  const type = await LeaveType.findOne({ _id: leaveType, ...companyFilter(req) });
   if (!type) return res.status(404).json({ error: 'Leave type not found' });
-  const setting = await getSetting();
+  const setting = await getSetting(req.companyId);
   const workingDays = (await workingDaysBetween(startDate, endDate, setting)).length;
   if (workingDays === 0) return res.status(422).json({ error: 'Selected range has no working days (weekends/holidays only)' });
 
@@ -54,7 +55,7 @@ router.post('/', async (req, res) => {
     }
   }
   const doc = await LeaveRequest.create({
-    employee: emp._id, leaveType: type._id, startDate, endDate, workingDays, reason: reason || '',
+    employee: emp._id, companyId: emp.companyId || req.companyId || null, leaveType: type._id, startDate, endDate, workingDays, reason: reason || '',
   });
   await logAudit(req, 'CREATE', 'LeaveRequest', doc._id, null, { startDate, endDate, workingDays });
   res.status(201).json(doc);
@@ -64,7 +65,7 @@ router.post('/', async (req, res) => {
 router.get('/balance', async (req, res) => {
   const emp = await resolveEmployee(req, res); if (!emp) return;
   const year = Number((req.query.year || todayStr().slice(0, 4)));
-  res.json(await leaveBalanceFor(emp._id, year));
+  res.json(await leaveBalanceFor(emp._id, year, req.companyId));
 });
 
 router.get('/', async (req, res) => {
@@ -78,35 +79,35 @@ router.get('/', async (req, res) => {
 });
 
 router.patch('/:id/approve', requireRole('hr'), async (req, res) => {
-  const doc = await LeaveRequest.findById(req.params.id).populate('employee');
+  const doc = await LeaveRequest.findOne({ _id: req.params.id, ...companyFilter(req) }).populate('employee');
   if (!doc) return res.status(404).json({ error: 'Leave request not found' });
   if (doc.status !== 'pending') return res.status(409).json({ error: 'Leave request already decided' });
   const before = doc.toObject();
   doc.status = 'approved'; doc.approverComment = req.body?.approverComment || '';
   await doc.save();
   if (doc.employee && doc.employee.user) {
-    await Notification.create({ user: doc.employee.user, message: `Your leave ${doc.startDate} to ${doc.endDate} was approved.`, type: 'leave' });
+    await Notification.create({ user: doc.employee.user, companyId: doc.companyId || req.companyId || null, message: `Your leave ${doc.startDate} to ${doc.endDate} was approved.`, type: 'leave' });
   }
   await logAudit(req, 'APPROVE', 'LeaveRequest', doc._id, before, doc);
   res.json(doc);
 });
 
 router.patch('/:id/reject', requireRole('hr'), async (req, res) => {
-  const doc = await LeaveRequest.findById(req.params.id).populate('employee');
+  const doc = await LeaveRequest.findOne({ _id: req.params.id, ...companyFilter(req) }).populate('employee');
   if (!doc) return res.status(404).json({ error: 'Leave request not found' });
   if (doc.status !== 'pending') return res.status(409).json({ error: 'Leave request already decided' });
   const before = doc.toObject();
   doc.status = 'rejected'; doc.approverComment = req.body?.approverComment || '';
   await doc.save();
   if (doc.employee && doc.employee.user) {
-    await Notification.create({ user: doc.employee.user, message: `Your leave ${doc.startDate} to ${doc.endDate} was rejected.${doc.approverComment ? ` ${doc.approverComment}` : ''}`, type: 'leave' });
+    await Notification.create({ user: doc.employee.user, companyId: doc.companyId || req.companyId || null, message: `Your leave ${doc.startDate} to ${doc.endDate} was rejected.${doc.approverComment ? ` ${doc.approverComment}` : ''}`, type: 'leave' });
   }
   await logAudit(req, 'REJECT', 'LeaveRequest', doc._id, before, doc);
   res.json(doc);
 });
 
 router.patch('/:id/cancel', async (req, res) => {
-  const doc = await LeaveRequest.findById(req.params.id);
+  const doc = await LeaveRequest.findOne({ _id: req.params.id, ...companyFilter(req) });
   if (!doc) return res.status(404).json({ error: 'Leave request not found' });
   if (req.user.role === 'employee' && String(doc.employee) !== ownEmployeeId(req)) {
     return res.status(403).json({ error: 'Forbidden: employees can only cancel their own leave' });

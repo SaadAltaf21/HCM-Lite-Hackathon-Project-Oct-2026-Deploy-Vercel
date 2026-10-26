@@ -9,15 +9,10 @@ const router = express.Router();
 router.post('/login', async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
-  // No users at all = the system was never set up. Say so explicitly instead
-  // of the misleading "Invalid credentials": there is no signup page by
-  // design — the first account is created on the Setup page (/setup).
-  if ((await User.countDocuments()) === 0) {
-    return res.status(403).json({
-      error: 'System not set up yet. Create the company and Admin account on the Setup page first.',
-      code: 'NOT_SETUP',
-    });
-  }
+  // Login is per-account, not per-system: any registered email works,
+  // whether it belongs to the first company or the hundredth. There is no
+  // global "not set up" state any more — a visitor with no account signs
+  // up on the Setup page instead.
   const user = await User.findOne({ email: String(email).toLowerCase() });
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
   if (!user.active) return res.status(403).json({ error: 'Account is deactivated' });

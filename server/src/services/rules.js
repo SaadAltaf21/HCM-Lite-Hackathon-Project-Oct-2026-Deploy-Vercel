@@ -39,24 +39,28 @@ function hoursBetween(t1, t2) {
   return (toMinutes(t2) - toMinutes(t1)) / 60;
 }
 
-async function getSetting() {
+async function getSetting(companyId) {
   const Setting = require('../models/Setting');
-  let s = await Setting.findOne();
+  let s = null;
+  if (companyId) s = await Setting.findById(companyId);
+  if (!s) s = await Setting.findOne();
   if (!s) s = { companyName: 'HCM Lite', officeStart: '09:00', graceMinutes: 15, weekendDays: ['Sat', 'Sun'], officeLat: null, officeLng: null, officeRadiusMeters: 150, halfDayHours: 5 };
   return s;
 }
-async function getDefaultLeaveTypes() {
+async function getDefaultLeaveTypes(companyId) {
   const LeaveType = require('../models/LeaveType');
-  const existing = await LeaveType.find();
+  // Per company: each new company gets its own default leave types, so
+  // companies never share (or clash on) leave-type rows.
+  const filter = companyId ? { companyId } : {};
+  const existing = await LeaveType.find(filter);
   if (existing.length) return existing;
-  // Brief defaults, created only on first setup / bootstrap — never seeded employees.
   const defaults = [
     { name: 'annual', annualQuota: 14 },
     { name: 'sick', annualQuota: 8 },
     { name: 'casual', annualQuota: 10 },
     { name: 'unpaid', annualQuota: null },
   ];
-  return LeaveType.insertMany(defaults);
+  return LeaveType.insertMany(defaults.map((d) => ({ ...d, companyId: companyId || null })));
 }
 
 function isWeekend(dateStr, setting) {
@@ -66,8 +70,10 @@ function isWeekend(dateStr, setting) {
   return nums.has(parseDate(dateStr).getDay());
 }
 
-async function holidaySet(start, end) {
-  const rows = await Holiday.find({ date: { $gte: start, $lte: end } }).lean();
+async function holidaySet(start, end, companyId) {
+  const filter = { date: { $gte: start, $lte: end } };
+  if (companyId) filter.companyId = companyId;
+  const rows = await Holiday.find(filter).lean();
   return new Set(rows.map((r) => r.date));
 }
 function eachDate(start, end) {
@@ -79,7 +85,7 @@ function eachDate(start, end) {
 }
 // Working days = calendar days minus weekends minus holidays.
 async function workingDaysBetween(start, end, setting) {
-  const holidays = await holidaySet(start, end);
+  const holidays = await holidaySet(start, end, setting && setting._id ? setting._id : null);
   return eachDate(start, end).filter((d) => !isWeekend(d, setting) && !holidays.has(d));
 }
 // Status at check-in: late only after office start + grace.

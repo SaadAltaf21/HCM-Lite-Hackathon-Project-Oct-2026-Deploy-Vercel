@@ -10,6 +10,7 @@ const { connectDB } = require('./config/db');
 const User = require('./models/User');
 const Setting = require('./models/Setting');
 const { getDefaultLeaveTypes } = require('./services/rules');
+const { migrateLegacyCompany } = require('./services/company');
 
 const app = express();
 app.use(cors());
@@ -28,7 +29,7 @@ app.use(async (req, res, next) => {
   if (req.path === '/health' || req.path === '/api/health') return next();
   if (mongoose.connection.readyState === 1) return next();
   if (!dbPromise) {
-    dbPromise = connectDB().then(() => bootstrapAdmin()).catch((err) => {
+    dbPromise = connectDB().then(() => migrateLegacyCompany()).then(() => bootstrapAdmin()).catch((err) => {
       dbPromise = null;
       throw err;
     });
@@ -71,18 +72,21 @@ app.use((err, req, res, next) => {
 async function bootstrapAdmin() {
   const { ADMIN_EMAIL, ADMIN_PASSWORD, COMPANY_NAME } = process.env;
   if (!ADMIN_EMAIL || !ADMIN_PASSWORD) return;
-  if (await User.countDocuments() > 0) return;
-  await Setting.findOneAndUpdate({}, { companyName: COMPANY_NAME || 'HCM Lite' }, { upsert: true, new: true });
+  if (await Setting.countDocuments() > 0) return;
+  if (await User.findOne({ email: ADMIN_EMAIL.toLowerCase() })) return;
+  const setting = await Setting.create({ companyName: COMPANY_NAME || 'HCM Lite' });
   await User.create({
     name: 'Admin', email: ADMIN_EMAIL.toLowerCase(),
     passwordHash: await bcrypt.hash(ADMIN_PASSWORD, 10), role: 'admin',
+    companyId: setting._id,
   });
-  await getDefaultLeaveTypes();
+  await getDefaultLeaveTypes(setting._id);
   console.log(`Bootstrap admin created: ${ADMIN_EMAIL}`);
 }
 
 async function start() {
   await connectDB();
+  await migrateLegacyCompany();
   await bootstrapAdmin();
   const port = process.env.PORT || 5000;
   const server = app.listen(port, () => console.log(`HCM Lite server listening on http://localhost:${port}`));

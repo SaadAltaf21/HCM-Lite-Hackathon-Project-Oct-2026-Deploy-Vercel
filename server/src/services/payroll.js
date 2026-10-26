@@ -25,17 +25,17 @@ function structureFor(emp) {
   return { basic, hra, medical, gross: basic + hra + medical }; // = 1.5 x basic by default
 }
 
-async function computePayrollRun(month) {
+async function computePayrollRun(month, companyId) {
   const [year, mon] = month.split('-').map(Number);
   const monthStart = `${month}-01`;
   const monthEnd = fmtDate(new Date(year, mon, 0)); // last day of month
   const Setting = require('../models/Setting');
-  const setting = (await Setting.findOne()) || {};
+  const setting = (companyId ? await Setting.findById(companyId) : await Setting.findOne()) || {};
   const workingDaysList = await workingDaysBetween(monthStart, monthEnd, setting);
   const workingDays = workingDaysList.length;
   const workingSet = new Set(workingDaysList);
 
-  const leaveTypes = await LeaveType.find().lean();
+  const leaveTypes = await LeaveType.find(companyId ? { companyId } : {}).lean();
   const unpaidIds = new Set(leaveTypes
     .filter((t) => t.name.toLowerCase() === 'unpaid' || t.annualQuota === null)
     .map((t) => String(t._id)));
@@ -43,6 +43,7 @@ async function computePayrollRun(month) {
   // Employees who joined on/before month end (exited staff are included only
   // when an exitDate exists, prorated up to that date).
   const employees = await Employee.find({
+    ...(companyId ? { companyId } : {}),
     joiningDate: { $lte: monthEnd },
     $or: [{ exitDate: null }, { exitDate: { $gte: monthStart } }, { status: { $ne: 'exited' } }],
   }).lean();
